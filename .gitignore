@@ -1,0 +1,6 @@
+bin/*
+!bin/.gitkeep
+logs/*
+!logs/.gitkeep
+artifacts/*
+!artifacts/.gitkeep

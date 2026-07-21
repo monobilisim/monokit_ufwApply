@@ -1,0 +1,41 @@
+# ONLY IPV4 SUPPORTED
+
+# Provided rules format should be like:
+# 100.110.70.80
+# 100.110.70.80/22
+# 100.110.70.0/24 # Comment
+
+# Rule IP addresses and IP blocks will be fetched from the list, comments are going to be stripped.
+# Protocols can be tcp, udp or all.
+# Ports can be a single port like 80
+# If IP block is not provided 32 will be used as default like
+# 100.110.70.0 # Comment -> 100.110.70.0/32
+rule-sources:
+  - url: "https://www.cloudflare.com/ips-v4"
+    protocol: "all"
+    port: "443"
+    comment: "Cloudflare IPs"
+  - url: "https://example.com/rules2.txt"
+    protocol: "udp"
+    port: "443"
+    comment: "Example Rule 2"
+  - url: "https://example.com/rules3.txt"
+    protocol: "all"
+    port: "443"
+    comment: "Example Rule 3"
+
+# Static rules that will always be applied
+# You can use both single IPs and IP blocks here.
+# Comments are optional.
+static-rules:
+  - ip: 100.110.70.80
+    protocol: "tcp"
+    port: "22"
+    comment: "SSH Access"
+  - ip: 100.110.70.0/24
+    protocol: "all"
+    port: "80"
+    comment: "Subnet HTTP Access"
+
+# Only change this if you know what you are doing.
+ruleset-dir: "/etc/mono/ufw-rulesets"

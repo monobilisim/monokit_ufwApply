@@ -1,0 +1,5 @@
+[Unit]
+Description=Exit container
+AllowIsolate=yes
+Requires=poweroff.target
+Wants=exit-code.service

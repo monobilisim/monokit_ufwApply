@@ -1,0 +1,39 @@
+project-identifier: "test"
+hostname: "test"
+
+log-location: "/var/log/monokit2.log"
+sqlite-location: "/var/lib/monokit2/monokit2.db"
+plugins-location: "/var/lib/monokit2/plugins"
+
+zulip-alarm:
+  enabled: true
+  # if any message send to zulip, it'll wait interval * 60 seconds to send or update another message
+  interval: 3
+  # how many times same alert can be sent back to back
+  limit: 10
+  webhook-urls:
+    - example.com
+    - example2.com
+
+  # not implemented
+  bot-api:
+    enabled: false
+    alarm-url: https://example.com
+    email: test-bot@example.com
+    api-key: testkey
+    user-emails:
+      - user@example.com
+
+redmine:
+  enabled: true
+  api-key: ""
+  url: ""
+  # if any issue send to redmine, it'll wait interval * 60 seconds to send or update another issue
+  interval: 10
+  # how many times same alert can be sent back to back
+  limit: 10
+
+auto-update:
+  enabled: false
+  # Only updates non major versions. (e.g. 1.2.3 to 1.2.4)
+  interval: 60 # in minutes

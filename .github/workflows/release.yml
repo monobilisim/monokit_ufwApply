@@ -1,0 +1,132 @@
+name: Build, Test & Release
+
+on:
+  push: # every push builds + tests; main pushes cut a devel prerelease, v* tags cut a full release
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Set up Go 1.25
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25"
+
+      - name: Set up just
+        uses: extractions/setup-just@v3
+
+      - name: Build binaries
+        # v* tag -> version is the tag name; any branch push -> "devel".
+        env:
+          VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'devel' }}
+        run: just build-all
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: go-binaries
+          path: bin/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Set up just
+        uses: extractions/setup-just@v3
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Run tests (inside Podman)
+        run: just test
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: test-artifacts
+          path: logs/
+
+  release:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: go-binaries
+          path: bin
+
+      - name: Generate checksums
+        run: |
+          (cd bin && sha256sum *) > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2.0.5
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          files: |
+            bin/*
+            checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  devel-release:
+    needs: [build, test]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: go-binaries
+          path: bin
+
+      - name: Generate checksums
+        run: |
+          (cd bin && sha256sum *) > checksums.txt
+          echo "Generated checksums:"
+          cat checksums.txt
+
+      - name: Delete existing devel prerelease (if exists)
+        run: |
+          if gh release view devel &>/dev/null; then
+            echo "Deleting existing devel release"
+            gh release delete devel --yes
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create devel prerelease
+        uses: softprops/action-gh-release@v2.0.5
+        with:
+          tag_name: devel
+          name: Devel Release (Latest)
+          prerelease: true
+          files: |
+            bin/*
+            checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

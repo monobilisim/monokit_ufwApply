@@ -1,0 +1,32 @@
+[Unit]
+Description=Run plugin tests inside the container
+After=multi-user.target systemd-journald.service
+Requires=systemd-journald.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/app
+Environment="PATH=/usr/local/go/bin:/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+Environment="GOPATH=/go"
+Environment="GOCACHE=/root/.cache/go-build"
+# TEST_RUN = optional -run filter, supplied by `just test` via `podman run -e ...`.
+PassEnvironment=TEST_RUN HOST_UID HOST_GID
+
+ExecStart=/bin/bash -c '\
+  set -o pipefail; \
+  if [ -n "$$TEST_RUN" ]; then \
+    TEST=true go test -v -count=1 -run "$$TEST_RUN" ./... 2>&1 | tee /var/log/monokit2.log; \
+  else \
+    TEST=true go test -v -count=1 ./... 2>&1 | tee /var/log/monokit2.log; \
+  fi; \
+  EXIT_CODE=$$?; \
+  echo $$EXIT_CODE > /run/test-exit-code; \
+  ./scripts/collect-test-artifacts.sh; \
+  systemctl poweroff; \
+  exit $$EXIT_CODE'
+
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

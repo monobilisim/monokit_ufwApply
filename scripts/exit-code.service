@@ -1,0 +1,8 @@
+[Unit]
+Description=Exit container with test status
+DefaultDependencies=no
+After=shutdown.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'exit $(cat /run/test-exit-code 2>/dev/null || echo 1)'
