@@ -114,7 +114,7 @@ jobs:
         run: |
           if gh release view devel &>/dev/null; then
             echo "Deleting existing devel release"
-            gh release delete devel --yes
+            gh release delete devel --yes --cleanup-tag
           fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
