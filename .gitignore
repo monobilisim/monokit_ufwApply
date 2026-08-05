@@ -4,3 +4,5 @@ logs/*
 !logs/.gitkeep
 artifacts/*
 !artifacts/.gitkeep
+
+monokit_ufwApply
