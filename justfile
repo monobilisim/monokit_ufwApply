@@ -63,6 +63,11 @@ test filter="":
 run *args: build
     "{{bindir}}/{{plugin}}" {{args}}
 
+# Update the monokit_lib dependency to the latest commit and tidy go.mod.
+update-lib:
+    go get github.com/monobilisim/monokit_lib@latest
+    go mod tidy
+
 # Remove this plugin's build artifacts from ./bin.
 clean:
     #!/usr/bin/env bash
