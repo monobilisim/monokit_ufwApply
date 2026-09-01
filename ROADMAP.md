@@ -11,3 +11,6 @@ UFW firewall rule manager plugin. Feature parity with monokit1 `ufwApply/`.
 - [ ] Cleanup of rules for lists removed from config
 - [ ] Static rule removal when dropped from config
 - [ ] `--no-cmdout` style output control
+- [ ] Configurable `ruleset_dir`, `rules_dir` and `tmp_dir_base` (timestamped temp dir per run)
+- [ ] Per-rule comments so rules stay attributable to their source list
+
