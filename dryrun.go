@@ -8,7 +8,7 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func UfwApplyDryRun(logger zerolog.Logger) error {
+func UfwApplyDryRun(logger zerolog.Logger, rulesets []string) error {
 	if len(lib.UfwApplyConfig.StaticRules) > 0 {
 		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
 			logger.Info().Msgf("Dry running static rule %s", staticRule.IP)
@@ -30,18 +30,12 @@ func UfwApplyDryRun(logger zerolog.Logger) error {
 		}
 	}
 
-	tmpFiles, err := os.ReadDir(lib.UfwApplyConfig.RulesetDir + "/tmp")
-	if err != nil {
-		logger.Error().Err(err).Msg("Failed to read tmp directory")
-		return err
-	}
+	for _, fileName := range rulesets {
+		logger.Info().Msgf("Dry running ruleset %s", fileName)
 
-	for _, file := range tmpFiles {
-		logger.Info().Msgf("Dry running ruleset %s", file.Name())
-
-		fileContent, err := os.ReadFile(lib.UfwApplyConfig.RulesetDir + "/tmp/" + file.Name())
+		fileContent, err := os.ReadFile(lib.UfwApplyConfig.RulesetDir + "/tmp/" + fileName)
 		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to read tmp file %s", file.Name())
+			logger.Error().Err(err).Msgf("Failed to read tmp file %s", fileName)
 			return err
 		}
 
@@ -63,7 +57,7 @@ func UfwApplyDryRun(logger zerolog.Logger) error {
 
 			lineParts := strings.Split(line, " ")
 			if len(lineParts) < 3 {
-				logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, file.Name())
+				logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, fileName)
 				continue
 			}
 

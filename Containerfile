@@ -3,9 +3,6 @@
 # ufwApply is Linux-only (it drives `ufw`). The container boots systemd as PID 1
 # and MUST be run with `--systemd=always` — that is why we use Podman, not Docker
 # (systemd-as-PID1 doesn't work on Docker). Invoke it via `just test`, never by hand.
-#
-# Note: ufwApply currently ships no tests, so `just test` only verifies that the
-# package compiles (go test reports "no test files").
 FROM golang:1.25-trixie
 
 ENV container=podman

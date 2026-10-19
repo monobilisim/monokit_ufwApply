@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 
@@ -37,120 +35,34 @@ func main() {
 
 	err = os.MkdirAll(lib.UfwApplyConfig.RulesetDir, os.ModePerm)
 	if err != nil {
-		fmt.Errorf("Failed to create ruleset directory: %v", err)
 		logger.Fatal().Err(err).Msg("Failed to create ruleset directory")
 		return
 	}
 
 	err = os.MkdirAll(lib.UfwApplyConfig.RulesetDir+"/tmp", os.ModePerm)
 	if err != nil {
-		fmt.Errorf("Failed to create tmp directory: %v", err)
 		logger.Fatal().Err(err).Msg("Failed to create tmp directory")
 		return
 	}
 
 	err = os.MkdirAll(lib.UfwApplyConfig.RulesetDir+"/rules", os.ModePerm)
 	if err != nil {
-		fmt.Errorf("Failed to create rules directory: %v", err)
 		logger.Fatal().Err(err).Msg("Failed to create rules directory")
 		return
 	}
 
-	logger.Debug().Msgf("RuleSources: %v", lib.UfwApplyConfig.RuleSources)
-
-	for _, ruleset := range lib.UfwApplyConfig.RuleSources {
-		logger.Info().Msgf("Fetching ruleset from %s", ruleset.Url)
-
-		if ruleset.Url == "" {
-			logger.Warn().Msg("Empty ruleset URL, skipping...")
-			continue
-		}
-
-		if ruleset.Protocol != "tcp" && ruleset.Protocol != "udp" && ruleset.Protocol != "all" {
-			logger.Warn().Msgf("Invalid protocol %s for ruleset %s, skipping...", ruleset.Protocol, ruleset.Url)
-			continue
-		}
-
-		if ruleset.Port == "" {
-			logger.Warn().Msgf("Empty port for ruleset %s, skipping...", ruleset.Url)
-			continue
-		}
-
-		ruleset.Url = strings.TrimSuffix(ruleset.Url, "/")
-
-		response, err := http.Get(ruleset.Url)
-		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to fetch ruleset from %s", ruleset.Url)
-			continue
-		}
-
-		defer response.Body.Close()
-
-		if response.StatusCode != http.StatusOK {
-			logger.Error().Msgf("Failed to fetch ruleset from %s: status code %d", ruleset.Url, response.StatusCode)
-			continue
-		}
-
-		splitUrl := strings.Split(ruleset.Url, "/")
-
-		outputFile, err := os.Create(lib.UfwApplyConfig.RulesetDir + "/tmp/" + splitUrl[len(splitUrl)-1])
-		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to create file for ruleset from %s", ruleset.Url)
-			continue
-		}
-		defer outputFile.Close()
-
-		responseText, err := io.ReadAll(response.Body)
-		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to read response body from %s", ruleset.Url)
-			continue
-		}
-
-		lines := strings.Split(string(responseText), "\n")
-		var newLines []string
-
-		for _, line := range lines {
-			// only get the ip part
-			if strings.Contains(line, "#") {
-				line = strings.Split(line, "#")[0]
-			}
-
-			line = strings.TrimSpace(line)
-
-			if line == "" {
-				continue
-			}
-
-			line = fmt.Sprintf("%s %s", line, ruleset.Protocol)
-
-			line = fmt.Sprintf("%s %s", line, ruleset.Port)
-
-			if ruleset.Comment != "" {
-				line = fmt.Sprintf("%s # %s", line, ruleset.Comment)
-			}
-
-			newLines = append(newLines, line)
-		}
-
-		_, err = outputFile.WriteString(strings.Join(newLines, "\n"))
-		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to write ruleset to file from %s", ruleset.Url)
-			continue
-		}
-
-		logger.Info().Msgf("Successfully fetched ruleset from %s", ruleset.Url)
-	}
+	changedRulesets := FetchRulesets(logger)
 
 	alarmMessage := ""
 
 	var moduleName string = "dryrun"
-	err = UfwApplyDryRun(logger)
+	err = UfwApplyDryRun(logger, changedRulesets)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to dry run ufw rules")
-
 		alarmMessage = fmt.Sprintf("[ufwApply] - %s - Failed to dry run ufw rules: %s", lib.GlobalConfig.Hostname, err.Error())
 
-		lib.SendZulipAlarm(alarmMessage, pluginName, moduleName, down)
+		alarmErr := lib.SendZulipAlarm(alarmMessage, pluginName, moduleName, down)
+
+		logger.Fatal().Err(err).AnErr("alarm_error", alarmErr).Msg("Failed to dry run ufw rules")
 
 		return
 	}
@@ -168,13 +80,13 @@ func main() {
 	}
 
 	moduleName = "apply"
-	err = UfwApply(logger)
+	err = UfwApply(logger, changedRulesets)
 	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to apply ufw rules")
-
 		alarmMessage = fmt.Sprintf("[ufwApply] - %s - Failed to apply ufw rules: %s", lib.GlobalConfig.Hostname, err.Error())
 
-		lib.SendZulipAlarm(alarmMessage, pluginName, moduleName, down)
+		alarmErr := lib.SendZulipAlarm(alarmMessage, pluginName, moduleName, down)
+
+		logger.Fatal().Err(err).AnErr("alarm_error", alarmErr).Msg("Failed to apply ufw rules")
 
 		return
 	}
@@ -194,7 +106,7 @@ func main() {
 	}
 }
 
-func UfwApply(logger zerolog.Logger) error {
+func UfwApply(logger zerolog.Logger, rulesets []string) error {
 	if len(lib.UfwApplyConfig.StaticRules) > 0 {
 		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
 			logger.Info().Msgf("Running static rule %s", staticRule.IP)
@@ -216,18 +128,12 @@ func UfwApply(logger zerolog.Logger) error {
 		}
 	}
 
-	tmpFiles, err := os.ReadDir(lib.UfwApplyConfig.RulesetDir + "/tmp")
-	if err != nil {
-		logger.Error().Err(err).Msg("Failed to read tmp directory")
-		return err
-	}
+	for _, fileName := range rulesets {
+		logger.Info().Msgf("Running ruleset %s", fileName)
 
-	for _, file := range tmpFiles {
-		logger.Info().Msgf("Running ruleset %s", file.Name())
-
-		fileContent, err := os.ReadFile(lib.UfwApplyConfig.RulesetDir + "/tmp/" + file.Name())
+		fileContent, err := os.ReadFile(lib.UfwApplyConfig.RulesetDir + "/tmp/" + fileName)
 		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to read tmp file %s", file.Name())
+			logger.Error().Err(err).Msgf("Failed to read tmp file %s", fileName)
 			return err
 		}
 
@@ -249,7 +155,7 @@ func UfwApply(logger zerolog.Logger) error {
 
 			lineParts := strings.Split(line, " ")
 			if len(lineParts) < 3 {
-				logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, file.Name())
+				logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, fileName)
 				continue
 			}
 
@@ -267,6 +173,11 @@ func UfwApply(logger zerolog.Logger) error {
 				logger.Error().Err(err).Msgf("Failed to execute command: %s", command)
 				return err
 			}
+		}
+
+		err = os.Rename(lib.UfwApplyConfig.RulesetDir+"/tmp/"+fileName, lib.UfwApplyConfig.RulesetDir+"/rules/"+fileName)
+		if err != nil {
+			logger.Error().Err(err).Msgf("Failed to save applied ruleset %s, it will be reapplied on the next run", fileName)
 		}
 	}
 
