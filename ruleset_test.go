@@ -48,6 +48,77 @@ func TestRulesetChanged(t *testing.T) {
 	}
 }
 
+// /dev/shm is its own mount, so the applied copy can't be renamed into t.TempDir() and has to be written
+func TestSaveAppliedRulesetAcrossFilesystems(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/dev/shm", "ufwApply-")
+	if err != nil {
+		t.Skipf("no /dev/shm to put the tmp dir on another filesystem: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+
+	content := []byte("192.0.2.0/24 tcp 443 # Test list\n198.51.100.7 tcp 443 # Test list")
+	tmpPath := filepath.Join(tmpDir, "test-list")
+	appliedPath := filepath.Join(t.TempDir(), "test-list")
+
+	err = os.WriteFile(tmpPath, content, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = saveAppliedRuleset(tmpPath, appliedPath, content)
+	if err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+
+	applied, err := os.ReadFile(appliedPath)
+	if err != nil {
+		t.Fatalf("applied copy is missing: %v", err)
+	}
+	if string(applied) != string(content) {
+		t.Errorf("applied copy is %q, want %q", applied, content)
+	}
+}
+
+func TestSetDefaultDirs(t *testing.T) {
+	savedConfig := lib.UfwApplyConfig
+	t.Cleanup(func() { lib.UfwApplyConfig = savedConfig })
+
+	tests := []struct {
+		name   string
+		config lib.UfwApplyConfigType
+		want   [3]string // ruleset-dir, rules-dir, tmp-dir-base
+	}{
+		{
+			name:   "nothing set",
+			config: lib.UfwApplyConfigType{},
+			want:   [3]string{"/etc/mono/ufw-rulesets", "/etc/mono/ufw-rulesets/rules", "/etc/mono/ufw-rulesets/tmp"},
+		},
+		{
+			name:   "only ruleset-dir set",
+			config: lib.UfwApplyConfigType{RulesetDir: "/var/lib/ufw-rulesets"},
+			want:   [3]string{"/var/lib/ufw-rulesets", "/var/lib/ufw-rulesets/rules", "/var/lib/ufw-rulesets/tmp"},
+		},
+		{
+			name:   "everything set",
+			config: lib.UfwApplyConfigType{RulesetDir: "/var/lib/ufw-rulesets", RulesDir: "/var/lib/ufw-rules", TmpDirBase: "/tmp/ufw-applier"},
+			want:   [3]string{"/var/lib/ufw-rulesets", "/var/lib/ufw-rules", "/tmp/ufw-applier"},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			lib.UfwApplyConfig = test.config
+
+			setDefaultDirs()
+
+			got := [3]string{lib.UfwApplyConfig.RulesetDir, lib.UfwApplyConfig.RulesDir, lib.UfwApplyConfig.TmpDirBase}
+			if got != test.want {
+				t.Errorf("got %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
 // Runs the fetch, dry run and apply steps against a local list server several
 // times and checks that only runs with a changed list reach ufw.
 func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
@@ -62,13 +133,7 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 	server := httptest.NewServer(http.FileServer(http.Dir(serveDir)))
 	defer server.Close()
 
-	rulesetDir := t.TempDir()
-	for _, dir := range []string{"tmp", "rules"} {
-		err := os.MkdirAll(filepath.Join(rulesetDir, dir), os.ModePerm)
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
+	rulesDir := t.TempDir()
 
 	steps := []struct {
 		name        string
@@ -134,7 +199,10 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			lib.UfwApplyConfig = lib.UfwApplyConfigType{RulesetDir: rulesetDir}
+			// every run gets its own tmp directory, like main does
+			tmpDir := t.TempDir()
+
+			lib.UfwApplyConfig = lib.UfwApplyConfigType{RulesDir: rulesDir}
 			lib.UfwApplyConfig.RuleSources = []struct {
 				Url      string `yaml:"url"`
 				Protocol string `yaml:"protocol"`
@@ -144,22 +212,22 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 				{Url: server.URL + "/test-list", Protocol: "tcp", Port: step.port, Comment: "Test list"},
 			}
 
-			changedRulesets := FetchRulesets(logger)
+			changedRulesets := FetchRulesets(logger, tmpDir)
 			if len(changedRulesets) != step.wantChanged {
 				t.Fatalf("got %d changed rulesets %v, want %d", len(changedRulesets), changedRulesets, step.wantChanged)
 			}
 
-			err = UfwApplyDryRun(logger, changedRulesets)
+			err = UfwApplyDryRun(logger, tmpDir, changedRulesets)
 			if err != nil {
 				t.Fatalf("dry run failed: %v", err)
 			}
 
-			err = UfwApply(logger, changedRulesets)
+			err = UfwApply(logger, tmpDir, changedRulesets)
 			if err != nil {
 				t.Fatalf("apply failed: %v", err)
 			}
 
-			tmpFiles, err := os.ReadDir(filepath.Join(rulesetDir, "tmp"))
+			tmpFiles, err := os.ReadDir(tmpDir)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -167,7 +235,7 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 				t.Errorf("tmp dir still has %d file(s) after apply, want 0", len(tmpFiles))
 			}
 
-			_, err = os.Stat(filepath.Join(rulesetDir, "rules", "test-list"))
+			_, err = os.Stat(filepath.Join(rulesDir, "test-list"))
 			if err != nil {
 				t.Errorf("applied copy of the list is missing: %v", err)
 			}

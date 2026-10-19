@@ -3,7 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	lib "github.com/monobilisim/monokit_lib"
 	"github.com/rs/zerolog"
@@ -15,6 +17,7 @@ var pluginName string = "ufwApply"
 var up string = "up"
 var down string = "down"
 var configFiles []string = []string{"ufw.yml"}
+var defaultRulesetDir string = "/etc/mono/ufw-rulesets"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -33,35 +36,41 @@ func main() {
 
 	logger.Info().Msg("Starting ufw Applier plugin...")
 
-	err = os.MkdirAll(lib.UfwApplyConfig.RulesetDir, os.ModePerm)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to create ruleset directory")
-		return
-	}
+	setDefaultDirs()
 
-	err = os.MkdirAll(lib.UfwApplyConfig.RulesetDir+"/tmp", os.ModePerm)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("Failed to create tmp directory")
-		return
-	}
-
-	err = os.MkdirAll(lib.UfwApplyConfig.RulesetDir+"/rules", os.ModePerm)
+	err = os.MkdirAll(lib.UfwApplyConfig.RulesDir, os.ModePerm)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("Failed to create rules directory")
 		return
 	}
 
-	changedRulesets := FetchRulesets(logger)
+	err = os.MkdirAll(lib.UfwApplyConfig.TmpDirBase, os.ModePerm)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to create tmp directory")
+		return
+	}
+
+	tmpDir, err := os.MkdirTemp(lib.UfwApplyConfig.TmpDirBase, time.Now().Format("20060102150405")+"-*")
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to create tmp directory for this run")
+		return
+	}
+
+	// logger.Fatal exits without running deferred calls, so the tmp directory is also removed before each Fatal below
+	defer removeTmpDir(logger, tmpDir)
+
+	changedRulesets := FetchRulesets(logger, tmpDir)
 
 	alarmMessage := ""
 
 	var moduleName string = "dryrun"
-	err = UfwApplyDryRun(logger, changedRulesets)
+	err = UfwApplyDryRun(logger, tmpDir, changedRulesets)
 	if err != nil {
 		alarmMessage = fmt.Sprintf("[ufwApply] - %s - Failed to dry run ufw rules: %s", lib.GlobalConfig.Hostname, err.Error())
 
 		alarmErr := lib.SendZulipAlarm(alarmMessage, pluginName, moduleName, down)
 
+		removeTmpDir(logger, tmpDir)
 		logger.Fatal().Err(err).AnErr("alarm_error", alarmErr).Msg("Failed to dry run ufw rules")
 
 		return
@@ -80,12 +89,13 @@ func main() {
 	}
 
 	moduleName = "apply"
-	err = UfwApply(logger, changedRulesets)
+	err = UfwApply(logger, tmpDir, changedRulesets)
 	if err != nil {
 		alarmMessage = fmt.Sprintf("[ufwApply] - %s - Failed to apply ufw rules: %s", lib.GlobalConfig.Hostname, err.Error())
 
 		alarmErr := lib.SendZulipAlarm(alarmMessage, pluginName, moduleName, down)
 
+		removeTmpDir(logger, tmpDir)
 		logger.Fatal().Err(err).AnErr("alarm_error", alarmErr).Msg("Failed to apply ufw rules")
 
 		return
@@ -106,7 +116,29 @@ func main() {
 	}
 }
 
-func UfwApply(logger zerolog.Logger, rulesets []string) error {
+// rules-dir and tmp-dir-base default to subdirectories of ruleset-dir when they are not set in ufw.yml
+func setDefaultDirs() {
+	if lib.UfwApplyConfig.RulesetDir == "" {
+		lib.UfwApplyConfig.RulesetDir = defaultRulesetDir
+	}
+
+	if lib.UfwApplyConfig.RulesDir == "" {
+		lib.UfwApplyConfig.RulesDir = filepath.Join(lib.UfwApplyConfig.RulesetDir, "rules")
+	}
+
+	if lib.UfwApplyConfig.TmpDirBase == "" {
+		lib.UfwApplyConfig.TmpDirBase = filepath.Join(lib.UfwApplyConfig.RulesetDir, "tmp")
+	}
+}
+
+func removeTmpDir(logger zerolog.Logger, tmpDir string) {
+	err := os.RemoveAll(tmpDir)
+	if err != nil {
+		logger.Warn().Err(err).Msgf("Failed to remove tmp directory %s", tmpDir)
+	}
+}
+
+func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string) error {
 	if len(lib.UfwApplyConfig.StaticRules) > 0 {
 		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
 			logger.Info().Msgf("Running static rule %s", staticRule.IP)
@@ -131,7 +163,7 @@ func UfwApply(logger zerolog.Logger, rulesets []string) error {
 	for _, fileName := range rulesets {
 		logger.Info().Msgf("Running ruleset %s", fileName)
 
-		fileContent, err := os.ReadFile(lib.UfwApplyConfig.RulesetDir + "/tmp/" + fileName)
+		fileContent, err := os.ReadFile(filepath.Join(tmpDir, fileName))
 		if err != nil {
 			logger.Error().Err(err).Msgf("Failed to read tmp file %s", fileName)
 			return err
@@ -175,7 +207,7 @@ func UfwApply(logger zerolog.Logger, rulesets []string) error {
 			}
 		}
 
-		err = os.Rename(lib.UfwApplyConfig.RulesetDir+"/tmp/"+fileName, lib.UfwApplyConfig.RulesetDir+"/rules/"+fileName)
+		err = saveAppliedRuleset(filepath.Join(tmpDir, fileName), filepath.Join(lib.UfwApplyConfig.RulesDir, fileName), fileContent)
 		if err != nil {
 			logger.Error().Err(err).Msgf("Failed to save applied ruleset %s, it will be reapplied on the next run", fileName)
 		}

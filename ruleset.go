@@ -7,13 +7,15 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 
 	lib "github.com/monobilisim/monokit_lib"
 	"github.com/rs/zerolog"
 )
 
-func FetchRulesets(logger zerolog.Logger) []string {
+func FetchRulesets(logger zerolog.Logger, tmpDir string) []string {
 	logger.Debug().Msgf("RuleSources: %v", lib.UfwApplyConfig.RuleSources)
 
 	var changedRulesets []string
@@ -95,7 +97,7 @@ func FetchRulesets(logger zerolog.Logger) []string {
 
 		content := []byte(strings.Join(newLines, "\n"))
 
-		changed, err := rulesetChanged(lib.UfwApplyConfig.RulesetDir+"/rules/"+fileName, content)
+		changed, err := rulesetChanged(filepath.Join(lib.UfwApplyConfig.RulesDir, fileName), content)
 		if err != nil {
 			logger.Warn().Err(err).Msgf("Failed to compare ruleset %s with last applied copy, reapplying...", fileName)
 		}
@@ -105,7 +107,7 @@ func FetchRulesets(logger zerolog.Logger) []string {
 			continue
 		}
 
-		err = os.WriteFile(lib.UfwApplyConfig.RulesetDir+"/tmp/"+fileName, content, 0644)
+		err = os.WriteFile(filepath.Join(tmpDir, fileName), content, 0644)
 		if err != nil {
 			logger.Error().Err(err).Msgf("Failed to write ruleset to file from %s", ruleset.Url)
 			continue
@@ -132,4 +134,13 @@ func rulesetChanged(appliedPath string, content []byte) (bool, error) {
 	}
 
 	return sha256.Sum256(applied) != sha256.Sum256(content), nil
+}
+
+func saveAppliedRuleset(tmpPath string, appliedPath string, content []byte) error {
+	err := os.Rename(tmpPath, appliedPath)
+	if errors.Is(err, syscall.EXDEV) {
+		return os.WriteFile(appliedPath, content, 0644)
+	}
+
+	return err
 }

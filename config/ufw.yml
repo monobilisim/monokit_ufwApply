@@ -37,5 +37,10 @@ static-rules:
     port: "80"
     comment: "Subnet HTTP Access"
 
-# Only change this if you know what you are doing.
+# Only change these if you know what you are doing.
+# rules-dir keeps the last applied copy of every list, it defaults to <ruleset-dir>/rules.
+# Lists are downloaded into a new timestamped directory under tmp-dir-base on every run,
+# it defaults to <ruleset-dir>/tmp and the run's directory is removed when the run ends.
 ruleset-dir: "/etc/mono/ufw-rulesets"
+# rules-dir: "/etc/mono/ufw-rulesets/rules"
+# tmp-dir-base: "/etc/mono/ufw-rulesets/tmp"
