@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"strings"
 
 	lib "github.com/monobilisim/monokit_lib"
@@ -118,6 +117,10 @@ func main() {
 
 			line = strings.TrimSpace(line)
 
+			if line == "" {
+				continue
+			}
+
 			line = fmt.Sprintf("%s %s", line, ruleset.Protocol)
 
 			line = fmt.Sprintf("%s %s", line, ruleset.Port)
@@ -126,9 +129,7 @@ func main() {
 				line = fmt.Sprintf("%s # %s", line, ruleset.Comment)
 			}
 
-			if line != "" {
-				newLines = append(newLines, line)
-			}
+			newLines = append(newLines, line)
 		}
 
 		_, err = outputFile.WriteString(strings.Join(newLines, "\n"))
@@ -198,31 +199,14 @@ func UfwApply(logger zerolog.Logger) error {
 		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
 			logger.Info().Msgf("Running static rule %s", staticRule.IP)
 
-			IP := staticRule.IP
-			Protocol := staticRule.Protocol
-			Port := staticRule.Port
-			Comment := staticRule.Comment
-
-			command := exec.Command("ufw", "allow", "from", IP)
-			if Port == "all" {
-				command.Args = append(command.Args, "to")
-				command.Args = append(command.Args, "any")
-			} else {
-				command.Args = append(command.Args, "to")
-				command.Args = append(command.Args, "any")
-				command.Args = append(command.Args, "port")
-				command.Args = append(command.Args, Port)
+			rule := Rule{
+				IP:       staticRule.IP,
+				Protocol: staticRule.Protocol,
+				Port:     staticRule.Port,
+				Comment:  staticRule.Comment,
 			}
 
-			if Protocol != "all" {
-				command.Args = append(command.Args, "proto")
-				command.Args = append(command.Args, Protocol)
-			}
-
-			if Comment != "" {
-				command.Args = append(command.Args, "comment")
-				command.Args = append(command.Args, Comment)
-			}
+			command := rule.AllowCommand(false)
 
 			_, err := command.CombinedOutput()
 			if err != nil {
@@ -264,31 +248,19 @@ func UfwApply(logger zerolog.Logger) error {
 			}
 
 			lineParts := strings.Split(line, " ")
-
-			IP := lineParts[0]
-			Protocol := lineParts[1]
-			Port := lineParts[2]
-
-			command := exec.Command("ufw", "allow", "from", IP)
-			if Port == "all" {
-				command.Args = append(command.Args, "to")
-				command.Args = append(command.Args, "any")
-			} else {
-				command.Args = append(command.Args, "to")
-				command.Args = append(command.Args, "any")
-				command.Args = append(command.Args, "port")
-				command.Args = append(command.Args, Port)
+			if len(lineParts) < 3 {
+				logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, file.Name())
+				continue
 			}
 
-			if Protocol != "all" {
-				command.Args = append(command.Args, "proto")
-				command.Args = append(command.Args, Protocol)
+			rule := Rule{
+				IP:       lineParts[0],
+				Protocol: lineParts[1],
+				Port:     lineParts[2],
+				Comment:  Comment,
 			}
 
-			if Comment != "" {
-				command.Args = append(command.Args, "comment")
-				command.Args = append(command.Args, Comment)
-			}
+			command := rule.AllowCommand(false)
 
 			_, err := command.CombinedOutput()
 			if err != nil {

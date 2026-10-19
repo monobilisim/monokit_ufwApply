@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"strings"
 
 	lib "github.com/monobilisim/monokit_lib"
@@ -14,31 +13,14 @@ func UfwApplyDryRun(logger zerolog.Logger) error {
 		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
 			logger.Info().Msgf("Dry running static rule %s", staticRule.IP)
 
-			IP := staticRule.IP
-			Protocol := staticRule.Protocol
-			Port := staticRule.Port
-			Comment := staticRule.Comment
-
-			command := exec.Command("ufw", "--dry-run", "allow", "from", IP)
-			if Port == "all" {
-				command.Args = append(command.Args, "to")
-				command.Args = append(command.Args, "any")
-			} else {
-				command.Args = append(command.Args, "to")
-				command.Args = append(command.Args, "any")
-				command.Args = append(command.Args, "port")
-				command.Args = append(command.Args, Port)
+			rule := Rule{
+				IP:       staticRule.IP,
+				Protocol: staticRule.Protocol,
+				Port:     staticRule.Port,
+				Comment:  staticRule.Comment,
 			}
 
-			if Protocol != "all" {
-				command.Args = append(command.Args, "proto")
-				command.Args = append(command.Args, Protocol)
-			}
-
-			if Comment != "" {
-				command.Args = append(command.Args, "comment")
-				command.Args = append(command.Args, Comment)
-			}
+			command := rule.AllowCommand(true)
 
 			_, err := command.CombinedOutput()
 			if err != nil {
@@ -80,31 +62,19 @@ func UfwApplyDryRun(logger zerolog.Logger) error {
 			}
 
 			lineParts := strings.Split(line, " ")
-
-			IP := lineParts[0]
-			Protocol := lineParts[1]
-			Port := lineParts[2]
-
-			command := exec.Command("ufw", "--dry-run", "allow", "from", IP)
-			if Port == "all" {
-				command.Args = append(command.Args, "to")
-				command.Args = append(command.Args, "any")
-			} else {
-				command.Args = append(command.Args, "to")
-				command.Args = append(command.Args, "any")
-				command.Args = append(command.Args, "port")
-				command.Args = append(command.Args, Port)
+			if len(lineParts) < 3 {
+				logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, file.Name())
+				continue
 			}
 
-			if Protocol != "all" {
-				command.Args = append(command.Args, "proto")
-				command.Args = append(command.Args, Protocol)
+			rule := Rule{
+				IP:       lineParts[0],
+				Protocol: lineParts[1],
+				Port:     lineParts[2],
+				Comment:  Comment,
 			}
 
-			if Comment != "" {
-				command.Args = append(command.Args, "comment")
-				command.Args = append(command.Args, Comment)
-			}
+			command := rule.AllowCommand(true)
 
 			_, err := command.CombinedOutput()
 			if err != nil {
