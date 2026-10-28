@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -41,8 +42,7 @@ func FetchRulesets(logger zerolog.Logger, tmpDir string) []string {
 
 		ruleset.Url = strings.TrimSuffix(ruleset.Url, "/")
 
-		splitUrl := strings.Split(ruleset.Url, "/")
-		fileName := splitUrl[len(splitUrl)-1]
+		fileName := rulesetFileName(ruleset.Url)
 
 		if seenFileNames[fileName] {
 			logger.Warn().Msgf("Another ruleset already uses the file name %s, skipping %s...", fileName, ruleset.Url)
@@ -121,6 +121,155 @@ func FetchRulesets(logger zerolog.Logger, tmpDir string) []string {
 	logger.Info().Msgf("%d ruleset(s) changed since last apply", len(changedRulesets))
 
 	return changedRulesets
+}
+
+func rulesetFileName(url string) string {
+	splitUrl := strings.Split(strings.TrimSuffix(url, "/"), "/")
+	return splitUrl[len(splitUrl)-1]
+}
+
+func RemovedRulesets(logger zerolog.Logger) []string {
+	configuredFileNames := make(map[string]bool)
+
+	for _, ruleset := range lib.UfwApplyConfig.RuleSources {
+		if ruleset.Url != "" {
+			configuredFileNames[rulesetFileName(ruleset.Url)] = true
+		}
+	}
+
+	entries, err := os.ReadDir(lib.UfwApplyConfig.RulesDir)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to read rules directory, skipping cleanup of removed rulesets")
+		return nil
+	}
+
+	var removedRulesets []string
+
+	for _, entry := range entries {
+		if entry.IsDir() || configuredFileNames[entry.Name()] {
+			continue
+		}
+
+		removedRulesets = append(removedRulesets, entry.Name())
+	}
+
+	logger.Info().Msgf("%d ruleset(s) removed from config since last apply: %v", len(removedRulesets), removedRulesets)
+
+	return removedRulesets
+}
+
+func RemoveRulesets(logger zerolog.Logger, removedRulesets []string, dryRun bool) error {
+	if len(removedRulesets) == 0 {
+		return nil
+	}
+
+	wantedRules, err := wantedRules(logger, removedRulesets)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to read the rules that are still needed")
+		return err
+	}
+
+	for _, fileName := range removedRulesets {
+		logger.Info().Msgf("Removing rules of ruleset %s, it is no longer in rule-sources (dry run: %v)", fileName, dryRun)
+
+		appliedPath := filepath.Join(lib.UfwApplyConfig.RulesDir, fileName)
+
+		fileContent, err := os.ReadFile(appliedPath)
+		if err != nil {
+			logger.Error().Err(err).Msgf("Failed to read applied ruleset %s", fileName)
+			return err
+		}
+
+		for _, rule := range parseRuleset(logger, fileName, fileContent) {
+			if wantedRules[rule.key()] {
+				logger.Info().Msgf("Keeping rule %s, a static rule or another ruleset still needs it", rule.key())
+				continue
+			}
+
+			command := rule.DeleteCommand(dryRun)
+
+			_, err := command.CombinedOutput()
+			if err != nil {
+				logger.Error().Err(err).Msgf("Failed to execute command: %s", command)
+				return err
+			}
+		}
+
+		if dryRun {
+			continue
+		}
+
+		err = os.Remove(appliedPath)
+		if err != nil {
+			logger.Error().Err(err).Msgf("Failed to remove applied ruleset %s, its rules will be deleted again on the next run", fileName)
+		}
+	}
+
+	return nil
+}
+
+func wantedRules(logger zerolog.Logger, removedRulesets []string) (map[string]bool, error) {
+	wanted := make(map[string]bool)
+
+	for _, staticRule := range lib.UfwApplyConfig.StaticRules {
+		wanted[Rule{IP: staticRule.IP, Protocol: staticRule.Protocol, Port: staticRule.Port}.key()] = true
+	}
+
+	entries, err := os.ReadDir(lib.UfwApplyConfig.RulesDir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || slices.Contains(removedRulesets, entry.Name()) {
+			continue
+		}
+
+		fileContent, err := os.ReadFile(filepath.Join(lib.UfwApplyConfig.RulesDir, entry.Name()))
+		if err != nil {
+			return nil, err
+		}
+
+		for _, rule := range parseRuleset(logger, entry.Name(), fileContent) {
+			wanted[rule.key()] = true
+		}
+	}
+
+	return wanted, nil
+}
+
+func parseRuleset(logger zerolog.Logger, fileName string, content []byte) []Rule {
+	var rules []Rule
+
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			logger.Warn().Msg("Empty line, skipping...")
+			continue
+		}
+
+		var Comment string = ""
+		if strings.Contains(line, "#") {
+			splitLine := strings.Split(line, "#")
+			line = strings.TrimSpace(splitLine[0])
+			Comment = strings.TrimSpace(splitLine[1])
+		}
+
+		lineParts := strings.Split(line, " ")
+		if len(lineParts) < 3 {
+			logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, fileName)
+			continue
+		}
+
+		rules = append(rules, Rule{
+			IP:       lineParts[0],
+			Protocol: lineParts[1],
+			Port:     lineParts[2],
+			Comment:  Comment,
+		})
+	}
+
+	return rules
 }
 
 func rulesetChanged(appliedPath string, content []byte) (bool, error) {

@@ -3,13 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 
 	lib "github.com/monobilisim/monokit_lib"
 	"github.com/rs/zerolog"
 )
 
-func UfwApplyDryRun(logger zerolog.Logger, tmpDir string, rulesets []string) error {
+func UfwApplyDryRun(logger zerolog.Logger, tmpDir string, rulesets []string, removedRulesets []string) error {
 	if len(lib.UfwApplyConfig.StaticRules) > 0 {
 		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
 			logger.Info().Msgf("Dry running static rule %s", staticRule.IP)
@@ -40,35 +39,7 @@ func UfwApplyDryRun(logger zerolog.Logger, tmpDir string, rulesets []string) err
 			return err
 		}
 
-		lines := strings.Split(string(fileContent), "\n")
-
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				logger.Warn().Msg("Empty line, skipping...")
-				continue
-			}
-
-			var Comment string = ""
-			if strings.Contains(line, "#") {
-				splitLine := strings.Split(line, "#")
-				line = strings.TrimSpace(splitLine[0])
-				Comment = strings.TrimSpace(splitLine[1])
-			}
-
-			lineParts := strings.Split(line, " ")
-			if len(lineParts) < 3 {
-				logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, fileName)
-				continue
-			}
-
-			rule := Rule{
-				IP:       lineParts[0],
-				Protocol: lineParts[1],
-				Port:     lineParts[2],
-				Comment:  Comment,
-			}
-
+		for _, rule := range parseRuleset(logger, fileName, fileContent) {
 			command := rule.AllowCommand(true)
 
 			_, err := command.CombinedOutput()
@@ -79,5 +50,5 @@ func UfwApplyDryRun(logger zerolog.Logger, tmpDir string, rulesets []string) err
 		}
 	}
 
-	return nil
+	return RemoveRulesets(logger, removedRulesets, true)
 }

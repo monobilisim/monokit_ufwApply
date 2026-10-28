@@ -10,6 +10,7 @@
 # Ports can be a single port like 80
 # If IP block is not provided 32 will be used as default like
 # 100.110.70.0 # Comment -> 100.110.70.0/32
+# Removing a source deletes the rules it added, except rules a static rule or another source also has.
 rule-sources:
   - url: "https://www.cloudflare.com/ips-v4"
     protocol: "all"
@@ -39,6 +40,8 @@ static-rules:
 
 # Only change these if you know what you are doing.
 # rules-dir keeps the last applied copy of every list, it defaults to <ruleset-dir>/rules.
+# Every file in rules-dir is treated as an applied list, so don't point it at a directory with other files:
+# a file that doesn't match a rule source gets its rules deleted from ufw and is removed.
 # Lists are downloaded into a new timestamped directory under tmp-dir-base on every run,
 # it defaults to <ruleset-dir>/tmp and the run's directory is removed when the run ends.
 ruleset-dir: "/etc/mono/ufw-rulesets"

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	lib "github.com/monobilisim/monokit_lib"
@@ -25,7 +24,9 @@ func main() {
 		return
 	}
 
-	lib.InitConfig(configFiles...)
+	if err := lib.InitConfig(configFiles...); err != nil {
+		panic("Failed to initialize config: " + err.Error())
+	}
 
 	logger, err := lib.InitLogger()
 	if err != nil {
@@ -60,11 +61,12 @@ func main() {
 	defer removeTmpDir(logger, tmpDir)
 
 	changedRulesets := FetchRulesets(logger, tmpDir)
+	removedRulesets := RemovedRulesets(logger)
 
 	alarmMessage := ""
 
 	var moduleName string = "dryrun"
-	err = UfwApplyDryRun(logger, tmpDir, changedRulesets)
+	err = UfwApplyDryRun(logger, tmpDir, changedRulesets, removedRulesets)
 	if err != nil {
 		alarmMessage = fmt.Sprintf("[ufwApply] - %s - Failed to dry run ufw rules: %s", lib.GlobalConfig.Hostname, err.Error())
 
@@ -89,7 +91,7 @@ func main() {
 	}
 
 	moduleName = "apply"
-	err = UfwApply(logger, tmpDir, changedRulesets)
+	err = UfwApply(logger, tmpDir, changedRulesets, removedRulesets)
 	if err != nil {
 		alarmMessage = fmt.Sprintf("[ufwApply] - %s - Failed to apply ufw rules: %s", lib.GlobalConfig.Hostname, err.Error())
 
@@ -138,7 +140,7 @@ func removeTmpDir(logger zerolog.Logger, tmpDir string) {
 	}
 }
 
-func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string) error {
+func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string, removedRulesets []string) error {
 	if len(lib.UfwApplyConfig.StaticRules) > 0 {
 		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
 			logger.Info().Msgf("Running static rule %s", staticRule.IP)
@@ -169,35 +171,7 @@ func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string) error {
 			return err
 		}
 
-		lines := strings.Split(string(fileContent), "\n")
-
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				logger.Warn().Msg("Empty line, skipping...")
-				continue
-			}
-
-			var Comment string = ""
-			if strings.Contains(line, "#") {
-				splitLine := strings.Split(line, "#")
-				line = strings.TrimSpace(splitLine[0])
-				Comment = strings.TrimSpace(splitLine[1])
-			}
-
-			lineParts := strings.Split(line, " ")
-			if len(lineParts) < 3 {
-				logger.Warn().Msgf("Malformed line %q in %s, skipping...", line, fileName)
-				continue
-			}
-
-			rule := Rule{
-				IP:       lineParts[0],
-				Protocol: lineParts[1],
-				Port:     lineParts[2],
-				Comment:  Comment,
-			}
-
+		for _, rule := range parseRuleset(logger, fileName, fileContent) {
 			command := rule.AllowCommand(false)
 
 			_, err := command.CombinedOutput()
@@ -213,5 +187,6 @@ func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string) error {
 		}
 	}
 
-	return nil
+	// runs after the changed rulesets are saved, so their new rules count as still needed
+	return RemoveRulesets(logger, removedRulesets, false)
 }

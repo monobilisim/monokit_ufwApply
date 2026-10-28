@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -119,6 +120,189 @@ func TestSetDefaultDirs(t *testing.T) {
 	}
 }
 
+func TestRemovedRulesets(t *testing.T) {
+	savedConfig := lib.UfwApplyConfig
+	t.Cleanup(func() { lib.UfwApplyConfig = savedConfig })
+
+	rulesDir := t.TempDir()
+
+	for _, fileName := range []string{"ips-v4", "rules2.txt", "old-list"} {
+		err := os.WriteFile(filepath.Join(rulesDir, fileName), nil, 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err := os.Mkdir(filepath.Join(rulesDir, "subdir"), 0755)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lib.UfwApplyConfig = lib.UfwApplyConfigType{RulesDir: rulesDir}
+	lib.UfwApplyConfig.RuleSources = []struct {
+		Url      string `yaml:"url"`
+		Protocol string `yaml:"protocol"`
+		Port     string `yaml:"port"`
+		Comment  string `yaml:"comment"`
+	}{
+		{Url: "https://www.cloudflare.com/ips-v4/", Protocol: "all", Port: "443"},
+		// FetchRulesets skips it for the typo in protocol, but it is still in config
+		{Url: "https://example.com/rules2.txt", Protocol: "tpc", Port: "443"},
+		{Url: ""},
+	}
+
+	got := RemovedRulesets(zerolog.Nop())
+	want := []string{"old-list"}
+
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// Applies two lists that share rules with each other and with a static rule, then drops
+// them from config one by one and checks that only rules nothing else needs are deleted.
+func TestRemovedRulesetsAreCleanedUp(t *testing.T) {
+	if !lib.IsTestMode() {
+		t.Skip("adds and deletes real ufw rules, run it inside the test container with `just test`")
+	}
+
+	savedConfig := lib.UfwApplyConfig
+	t.Cleanup(func() { lib.UfwApplyConfig = savedConfig })
+
+	serveDir := t.TempDir()
+	server := httptest.NewServer(http.FileServer(http.Dir(serveDir)))
+	defer server.Close()
+
+	// 198.51.100.21 is in both lists and 198.51.100.22 is also a static rule,
+	// list-b is applied last so ufw keeps its comment on both
+	lists := map[string]string{
+		"list-a": "198.51.100.20\n198.51.100.21\n",
+		"list-b": "198.51.100.21/32\n198.51.100.22\n198.51.100.23\n",
+	}
+
+	for fileName, list := range lists {
+		err := os.WriteFile(filepath.Join(serveDir, fileName), []byte(list), 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	rulesDir := t.TempDir()
+
+	lib.UfwApplyConfig = lib.UfwApplyConfigType{RulesDir: rulesDir}
+	lib.UfwApplyConfig.RuleSources = []struct {
+		Url      string `yaml:"url"`
+		Protocol string `yaml:"protocol"`
+		Port     string `yaml:"port"`
+		Comment  string `yaml:"comment"`
+	}{
+		{Url: server.URL + "/list-a", Protocol: "tcp", Port: "2222", Comment: "List A"},
+		{Url: server.URL + "/list-b", Protocol: "tcp", Port: "2222", Comment: "List B"},
+	}
+	lib.UfwApplyConfig.StaticRules = []struct {
+		IP       string `yaml:"ip"`
+		Protocol string `yaml:"protocol"`
+		Port     string `yaml:"port"`
+		Comment  string `yaml:"comment"`
+	}{
+		{IP: "198.51.100.22", Protocol: "tcp", Port: "2222", Comment: "Static rule"},
+	}
+	ruleSources := lib.UfwApplyConfig.RuleSources
+
+	steps := []struct {
+		name         string
+		lists        int // how many of the rule sources stay in config
+		wantRules    []string
+		wantNoRules  []string
+		wantFileList []string
+	}{
+		{
+			name:         "both lists are applied",
+			lists:        2,
+			wantRules:    []string{"198.51.100.20", "198.51.100.21", "198.51.100.22", "198.51.100.23"},
+			wantFileList: []string{"list-a", "list-b"},
+		},
+		{
+			name:         "list-b removed from config",
+			lists:        1,
+			wantRules:    []string{"198.51.100.20", "198.51.100.21", "198.51.100.22"},
+			wantNoRules:  []string{"198.51.100.23"},
+			wantFileList: []string{"list-a"},
+		},
+		{
+			// 198.51.100.21 still carries list-b's comment
+			name:        "list-a removed from config",
+			lists:       0,
+			wantRules:   []string{"198.51.100.22"},
+			wantNoRules: []string{"198.51.100.20", "198.51.100.21"},
+		},
+	}
+
+	for _, step := range steps {
+		ok := t.Run(step.name, func(t *testing.T) {
+			logger := zerolog.New(zerolog.ConsoleWriter{
+				Out:          zerolog.NewTestWriter(t),
+				NoColor:      true,
+				PartsExclude: []string{zerolog.TimestampFieldName},
+			})
+
+			lib.UfwApplyConfig.RuleSources = ruleSources[:step.lists]
+
+			tmpDir := t.TempDir()
+
+			changedRulesets := FetchRulesets(logger, tmpDir)
+			removedRulesets := RemovedRulesets(logger)
+
+			err := UfwApplyDryRun(logger, tmpDir, changedRulesets, removedRulesets)
+			if err != nil {
+				t.Fatalf("dry run failed: %v", err)
+			}
+
+			err = UfwApply(logger, tmpDir, changedRulesets, removedRulesets)
+			if err != nil {
+				t.Fatalf("apply failed: %v", err)
+			}
+
+			output, err := exec.Command("ufw", "show", "added").CombinedOutput()
+			if err != nil {
+				t.Fatalf("ufw show added failed: %v\n%s", err, output)
+			}
+
+			for _, ip := range step.wantRules {
+				rule := "ufw allow from " + ip + " to any port 2222 proto tcp"
+				if !strings.Contains(string(output), rule) {
+					t.Errorf("ufw is missing rule %q, got:\n%s", rule, output)
+				}
+			}
+
+			for _, ip := range step.wantNoRules {
+				rule := "ufw allow from " + ip + " to any port 2222 proto tcp"
+				if strings.Contains(string(output), rule) {
+					t.Errorf("ufw still has rule %q, got:\n%s", rule, output)
+				}
+			}
+
+			entries, err := os.ReadDir(rulesDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var fileList []string
+			for _, entry := range entries {
+				fileList = append(fileList, entry.Name())
+			}
+
+			if !slices.Equal(fileList, step.wantFileList) {
+				t.Errorf("rules dir has %v, want %v", fileList, step.wantFileList)
+			}
+		})
+
+		if !ok {
+			t.FailNow()
+		}
+	}
+}
+
 // Runs the fetch, dry run and apply steps against a local list server several
 // times and checks that only runs with a changed list reach ufw.
 func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
@@ -217,12 +401,12 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 				t.Fatalf("got %d changed rulesets %v, want %d", len(changedRulesets), changedRulesets, step.wantChanged)
 			}
 
-			err = UfwApplyDryRun(logger, tmpDir, changedRulesets)
+			err = UfwApplyDryRun(logger, tmpDir, changedRulesets, nil)
 			if err != nil {
 				t.Fatalf("dry run failed: %v", err)
 			}
 
-			err = UfwApply(logger, tmpDir, changedRulesets)
+			err = UfwApply(logger, tmpDir, changedRulesets, nil)
 			if err != nil {
 				t.Fatalf("apply failed: %v", err)
 			}
