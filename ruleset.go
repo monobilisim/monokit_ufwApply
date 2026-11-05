@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -84,15 +83,14 @@ func FetchRulesets(logger zerolog.Logger, tmpDir string) []string {
 				continue
 			}
 
-			line = fmt.Sprintf("%s %s", line, ruleset.Protocol)
-
-			line = fmt.Sprintf("%s %s", line, ruleset.Port)
-
-			if ruleset.Comment != "" {
-				line = fmt.Sprintf("%s # %s", line, ruleset.Comment)
+			rule := Rule{
+				IP:       line,
+				Protocol: ruleset.Protocol,
+				Port:     ruleset.Port,
+				Comment:  ruleset.Comment,
 			}
 
-			newLines = append(newLines, line)
+			newLines = append(newLines, rule.line())
 		}
 
 		content := []byte(strings.Join(newLines, "\n"))
@@ -158,61 +156,49 @@ func RemovedRulesets(logger zerolog.Logger) []string {
 	return removedRulesets
 }
 
-func RemoveRulesets(logger zerolog.Logger, removedRulesets []string, dryRun bool) error {
-	if len(removedRulesets) == 0 {
-		return nil
+func staticRulesPath() string {
+	return filepath.Join(lib.UfwApplyConfig.RulesetDir, staticRulesFileName)
+}
+
+// StaleRules returns the rules in the last applied copies of the static rules and of the changed and removed
+// rulesets that no static rule or ruleset needs after this run. It has to run before the applied copies are
+// saved, so the dry run and the apply see the same rules.
+func StaleRules(logger zerolog.Logger, tmpDir string, changedRulesets []string, removedRulesets []string) ([]Rule, error) {
+	appliedPaths := []string{staticRulesPath()}
+	for _, fileName := range slices.Concat(changedRulesets, removedRulesets) {
+		appliedPaths = append(appliedPaths, filepath.Join(lib.UfwApplyConfig.RulesDir, fileName))
 	}
 
-	wantedRules, err := wantedRules(logger, removedRulesets)
-	if err != nil {
-		logger.Error().Err(err).Msg("Failed to read the rules that are still needed")
-		return err
-	}
+	var appliedRules []Rule
 
-	for _, fileName := range removedRulesets {
-		logger.Info().Msgf("Removing rules of ruleset %s, it is no longer in rule-sources (dry run: %v)", fileName, dryRun)
-
-		appliedPath := filepath.Join(lib.UfwApplyConfig.RulesDir, fileName)
-
-		fileContent, err := os.ReadFile(appliedPath)
-		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to read applied ruleset %s", fileName)
-			return err
-		}
-
-		for _, rule := range parseRuleset(logger, fileName, fileContent) {
-			if wantedRules[rule.key()] {
-				logger.Info().Msgf("Keeping rule %s, a static rule or another ruleset still needs it", rule.key())
-				continue
-			}
-
-			command := rule.DeleteCommand(dryRun)
-
-			_, err := command.CombinedOutput()
-			if err != nil {
-				logger.Error().Err(err).Msgf("Failed to execute command: %s", command)
-				return err
-			}
-		}
-
-		if dryRun {
+	for _, path := range appliedPaths {
+		rules, err := readRuleset(logger, path)
+		// new rulesets and static rules on the first run have no applied copy yet
+		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 
-		err = os.Remove(appliedPath)
 		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to remove applied ruleset %s, its rules will be deleted again on the next run", fileName)
+			return nil, err
 		}
+
+		appliedRules = append(appliedRules, rules...)
 	}
 
-	return nil
-}
+	if len(appliedRules) == 0 {
+		return nil, nil
+	}
 
-func wantedRules(logger zerolog.Logger, removedRulesets []string) (map[string]bool, error) {
 	wanted := make(map[string]bool)
 
-	for _, staticRule := range lib.UfwApplyConfig.StaticRules {
-		wanted[Rule{IP: staticRule.IP, Protocol: staticRule.Protocol, Port: staticRule.Port}.key()] = true
+	for _, rule := range staticRules() {
+		wanted[rule.key()] = true
+	}
+
+	// changed rulesets are wanted with their new content, the others with their applied copy
+	var wantedPaths []string
+	for _, fileName := range changedRulesets {
+		wantedPaths = append(wantedPaths, filepath.Join(tmpDir, fileName))
 	}
 
 	entries, err := os.ReadDir(lib.UfwApplyConfig.RulesDir)
@@ -221,21 +207,104 @@ func wantedRules(logger zerolog.Logger, removedRulesets []string) (map[string]bo
 	}
 
 	for _, entry := range entries {
-		if entry.IsDir() || slices.Contains(removedRulesets, entry.Name()) {
+		if entry.IsDir() || slices.Contains(changedRulesets, entry.Name()) || slices.Contains(removedRulesets, entry.Name()) {
 			continue
 		}
 
-		fileContent, err := os.ReadFile(filepath.Join(lib.UfwApplyConfig.RulesDir, entry.Name()))
+		wantedPaths = append(wantedPaths, filepath.Join(lib.UfwApplyConfig.RulesDir, entry.Name()))
+	}
+
+	for _, path := range wantedPaths {
+		rules, err := readRuleset(logger, path)
 		if err != nil {
 			return nil, err
 		}
 
-		for _, rule := range parseRuleset(logger, entry.Name(), fileContent) {
+		for _, rule := range rules {
 			wanted[rule.key()] = true
 		}
 	}
 
-	return wanted, nil
+	var staleRules []Rule
+	staleKeys := make(map[string]bool)
+
+	for _, rule := range appliedRules {
+		if wanted[rule.key()] || staleKeys[rule.key()] {
+			continue
+		}
+
+		staleKeys[rule.key()] = true
+		staleRules = append(staleRules, rule)
+	}
+
+	logger.Info().Msgf("%d rule(s) are no longer in any ruleset or static rule", len(staleRules))
+
+	return staleRules, nil
+}
+
+func DeleteRules(logger zerolog.Logger, rules []Rule, dryRun bool) error {
+	for _, rule := range rules {
+		logger.Info().Msgf("Deleting rule %s, no ruleset or static rule needs it anymore (dry run: %v)", rule.key(), dryRun)
+
+		err := runCommand(logger, rule.DeleteCommand(dryRun))
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// saveAppliedCopies runs once every rule is added and every stale rule is deleted, so a run that fails
+// before it keeps the last applied copies and the next run retries the same changes
+func saveAppliedCopies(logger zerolog.Logger, tmpDir string, changedRulesets []string, removedRulesets []string) {
+	for _, fileName := range changedRulesets {
+		err := saveAppliedRuleset(filepath.Join(tmpDir, fileName), filepath.Join(lib.UfwApplyConfig.RulesDir, fileName))
+		if err != nil {
+			logger.Error().Err(err).Msgf("Failed to save applied ruleset %s, it will be reapplied on the next run", fileName)
+		}
+	}
+
+	for _, fileName := range removedRulesets {
+		err := os.Remove(filepath.Join(lib.UfwApplyConfig.RulesDir, fileName))
+		if err != nil {
+			logger.Error().Err(err).Msgf("Failed to remove applied ruleset %s, its rules will be deleted again on the next run", fileName)
+		}
+	}
+
+	err := saveStaticRules()
+	if err != nil {
+		logger.Error().Err(err).Msgf("Failed to save applied static rules to %s, static rules dropped from config since the last save may stay in ufw", staticRulesPath())
+	}
+}
+
+func saveStaticRules() error {
+	rules := staticRules()
+
+	if len(rules) == 0 {
+		err := os.Remove(staticRulesPath())
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+
+		return err
+	}
+
+	var lines []string
+	for _, rule := range rules {
+		lines = append(lines, rule.line())
+	}
+
+	return os.WriteFile(staticRulesPath(), []byte(strings.Join(lines, "\n")), 0644)
+}
+
+func readRuleset(logger zerolog.Logger, path string) ([]Rule, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return parseRuleset(logger, filepath.Base(path), content), nil
 }
 
 func parseRuleset(logger zerolog.Logger, fileName string, content []byte) []Rule {
@@ -285,11 +354,16 @@ func rulesetChanged(appliedPath string, content []byte) (bool, error) {
 	return sha256.Sum256(applied) != sha256.Sum256(content), nil
 }
 
-func saveAppliedRuleset(tmpPath string, appliedPath string, content []byte) error {
+func saveAppliedRuleset(tmpPath string, appliedPath string) error {
 	err := os.Rename(tmpPath, appliedPath)
-	if errors.Is(err, syscall.EXDEV) {
-		return os.WriteFile(appliedPath, content, 0644)
+	if !errors.Is(err, syscall.EXDEV) {
+		return err
 	}
 
-	return err
+	content, err := os.ReadFile(tmpPath)
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(appliedPath, content, 0644)
 }

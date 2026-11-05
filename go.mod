@@ -3,7 +3,7 @@ module github.com/monobilisim/monokit_ufwApply
 go 1.25.5
 
 require (
-	github.com/monobilisim/monokit_lib v0.0.0-20261019041504-1a618ada9b8d
+	github.com/monobilisim/monokit_lib v0.0.0-20261105065920-9fef1dae30b9
 	github.com/rs/zerolog v1.35.1
 )
 

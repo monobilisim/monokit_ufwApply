@@ -17,6 +17,7 @@ var up string = "up"
 var down string = "down"
 var configFiles []string = []string{"ufw.yml"}
 var defaultRulesetDir string = "/etc/mono/ufw-rulesets"
+var staticRulesFileName string = "static-rules"
 
 func main() {
 	if len(os.Args) > 1 {
@@ -38,6 +39,18 @@ func main() {
 	logger.Info().Msg("Starting ufw Applier plugin...")
 
 	setDefaultDirs()
+
+	// the applied static rules are kept in ruleset-dir, every file in rules-dir would count as an applied ruleset
+	if filepath.Clean(lib.UfwApplyConfig.RulesDir) == filepath.Clean(lib.UfwApplyConfig.RulesetDir) {
+		logger.Fatal().Msgf("rules-dir can't be the same directory as ruleset-dir (%s)", lib.UfwApplyConfig.RulesetDir)
+		return
+	}
+
+	err = os.MkdirAll(lib.UfwApplyConfig.RulesetDir, os.ModePerm)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("Failed to create ruleset directory")
+		return
+	}
 
 	err = os.MkdirAll(lib.UfwApplyConfig.RulesDir, os.ModePerm)
 	if err != nil {
@@ -141,24 +154,18 @@ func removeTmpDir(logger zerolog.Logger, tmpDir string) {
 }
 
 func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string, removedRulesets []string) error {
-	if len(lib.UfwApplyConfig.StaticRules) > 0 {
-		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
-			logger.Info().Msgf("Running static rule %s", staticRule.IP)
+	staleRules, err := StaleRules(logger, tmpDir, rulesets, removedRulesets)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to find the rules that are no longer needed")
+		return err
+	}
 
-			rule := Rule{
-				IP:       staticRule.IP,
-				Protocol: staticRule.Protocol,
-				Port:     staticRule.Port,
-				Comment:  staticRule.Comment,
-			}
+	for _, rule := range staticRules() {
+		logger.Info().Msgf("Running static rule %s", rule.IP)
 
-			command := rule.AllowCommand(false)
-
-			_, err := command.CombinedOutput()
-			if err != nil {
-				logger.Error().Err(err).Msgf("Failed to execute command: %s", command)
-				return err
-			}
+		err := runCommand(logger, rule.AllowCommand(false))
+		if err != nil {
+			return err
 		}
 	}
 
@@ -172,21 +179,19 @@ func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string, removedRu
 		}
 
 		for _, rule := range parseRuleset(logger, fileName, fileContent) {
-			command := rule.AllowCommand(false)
-
-			_, err := command.CombinedOutput()
+			err := runCommand(logger, rule.AllowCommand(false))
 			if err != nil {
-				logger.Error().Err(err).Msgf("Failed to execute command: %s", command)
 				return err
 			}
 		}
-
-		err = saveAppliedRuleset(filepath.Join(tmpDir, fileName), filepath.Join(lib.UfwApplyConfig.RulesDir, fileName), fileContent)
-		if err != nil {
-			logger.Error().Err(err).Msgf("Failed to save applied ruleset %s, it will be reapplied on the next run", fileName)
-		}
 	}
 
-	// runs after the changed rulesets are saved, so their new rules count as still needed
-	return RemoveRulesets(logger, removedRulesets, false)
+	err = DeleteRules(logger, staleRules, false)
+	if err != nil {
+		return err
+	}
+
+	saveAppliedCopies(logger, tmpDir, rulesets, removedRulesets)
+
+	return nil
 }

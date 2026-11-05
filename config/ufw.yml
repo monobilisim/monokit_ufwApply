@@ -11,6 +11,7 @@
 # If IP block is not provided 32 will be used as default like
 # 100.110.70.0 # Comment -> 100.110.70.0/32
 # Removing a source deletes the rules it added, except rules a static rule or another source also has.
+# The same goes for rules a source no longer has, like an IP dropped from the list or the old port after a port change.
 rule-sources:
   - url: "https://www.cloudflare.com/ips-v4"
     protocol: "all"
@@ -26,6 +27,7 @@ rule-sources:
     comment: "Example Rule 3"
 
 # Static rules that will always be applied
+# Removing a static rule, or changing its ip, protocol or port, deletes the old rule unless a rule source also has it.
 # You can use both single IPs and IP blocks here.
 # Comments are optional.
 static-rules:
@@ -38,10 +40,16 @@ static-rules:
     port: "80"
     comment: "Subnet HTTP Access"
 
+# Logs every ufw command with ufw's answer (Rule added, Skipping adding existing rule, Rule deleted...),
+# dry run commands are logged without their output. Set it to false to keep long lists out of the log,
+# a failed command is always logged and sent in the alarm with ufw's output.
+command-output: true
+
 # Only change these if you know what you are doing.
 # rules-dir keeps the last applied copy of every list, it defaults to <ruleset-dir>/rules.
 # Every file in rules-dir is treated as an applied list, so don't point it at a directory with other files:
 # a file that doesn't match a rule source gets its rules deleted from ufw and is removed.
+# The last applied static rules are kept in <ruleset-dir>/static-rules, so rules-dir can't be ruleset-dir itself.
 # Lists are downloaded into a new timestamped directory under tmp-dir-base on every run,
 # it defaults to <ruleset-dir>/tmp and the run's directory is removed when the run ends.
 ruleset-dir: "/etc/mono/ufw-rulesets"

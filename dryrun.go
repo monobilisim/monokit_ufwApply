@@ -4,29 +4,22 @@ import (
 	"os"
 	"path/filepath"
 
-	lib "github.com/monobilisim/monokit_lib"
 	"github.com/rs/zerolog"
 )
 
 func UfwApplyDryRun(logger zerolog.Logger, tmpDir string, rulesets []string, removedRulesets []string) error {
-	if len(lib.UfwApplyConfig.StaticRules) > 0 {
-		for _, staticRule := range lib.UfwApplyConfig.StaticRules {
-			logger.Info().Msgf("Dry running static rule %s", staticRule.IP)
+	staleRules, err := StaleRules(logger, tmpDir, rulesets, removedRulesets)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to find the rules that are no longer needed")
+		return err
+	}
 
-			rule := Rule{
-				IP:       staticRule.IP,
-				Protocol: staticRule.Protocol,
-				Port:     staticRule.Port,
-				Comment:  staticRule.Comment,
-			}
+	for _, rule := range staticRules() {
+		logger.Info().Msgf("Dry running static rule %s", rule.IP)
 
-			command := rule.AllowCommand(true)
-
-			_, err := command.CombinedOutput()
-			if err != nil {
-				logger.Error().Err(err).Msgf("Failed to execute command: %s", command)
-				return err
-			}
+		err := runCommand(logger, rule.AllowCommand(true))
+		if err != nil {
+			return err
 		}
 	}
 
@@ -40,15 +33,12 @@ func UfwApplyDryRun(logger zerolog.Logger, tmpDir string, rulesets []string, rem
 		}
 
 		for _, rule := range parseRuleset(logger, fileName, fileContent) {
-			command := rule.AllowCommand(true)
-
-			_, err := command.CombinedOutput()
+			err := runCommand(logger, rule.AllowCommand(true))
 			if err != nil {
-				logger.Error().Err(err).Msgf("Failed to execute command: %s", command)
 				return err
 			}
 		}
 	}
 
-	return RemoveRulesets(logger, removedRulesets, true)
+	return DeleteRules(logger, staleRules, true)
 }
