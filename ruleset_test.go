@@ -161,8 +161,9 @@ func TestRemovedRulesets(t *testing.T) {
 	}
 }
 
-// Applies two lists that share rules with each other and with a static rule, then drops
-// them from config one by one and checks that only rules nothing else needs are deleted.
+// Applies two lists that share rules with each other and with a static rule, then drops them from config
+// one by one and checks that only rules nothing else needs are deleted and that a shared rule takes the
+// comment of what still has it.
 func TestRemovedRulesetsAreCleanedUp(t *testing.T) {
 	if !lib.IsTestMode() {
 		t.Skip("adds and deletes real ufw rules, run it inside the test container with `just test`")
@@ -175,8 +176,8 @@ func TestRemovedRulesetsAreCleanedUp(t *testing.T) {
 	server := httptest.NewServer(http.FileServer(http.Dir(serveDir)))
 	defer server.Close()
 
-	// 198.51.100.21 is in both lists and 198.51.100.22 is also a static rule,
-	// list-b is applied last so ufw keeps its comment on both
+	// 198.51.100.21 is in both lists and gets list-a's comment as list-a comes first in config,
+	// 198.51.100.22 is also a static rule and gets its comment as static rules come first
 	lists := map[string]string{
 		"list-a": "198.51.100.20\n198.51.100.21\n",
 		"list-b": "198.51.100.21/32\n198.51.100.22\n198.51.100.23\n",
@@ -213,30 +214,38 @@ func TestRemovedRulesetsAreCleanedUp(t *testing.T) {
 
 	steps := []struct {
 		name         string
-		lists        int // how many of the rule sources stay in config
-		wantRules    []string
+		lists        []int             // the rule sources that stay in config
+		wantRules    map[string]string // ip -> comment
 		wantNoRules  []string
 		wantFileList []string
 	}{
 		{
-			name:         "both lists are applied",
-			lists:        2,
-			wantRules:    []string{"198.51.100.20", "198.51.100.21", "198.51.100.22", "198.51.100.23"},
+			name:  "both lists are applied",
+			lists: []int{0, 1},
+			wantRules: map[string]string{
+				"198.51.100.20": "List A",
+				"198.51.100.21": "List A",
+				"198.51.100.22": "Static rule",
+				"198.51.100.23": "List B",
+			},
 			wantFileList: []string{"list-a", "list-b"},
 		},
 		{
-			name:         "list-b removed from config",
-			lists:        1,
-			wantRules:    []string{"198.51.100.20", "198.51.100.21", "198.51.100.22"},
-			wantNoRules:  []string{"198.51.100.23"},
-			wantFileList: []string{"list-a"},
+			// list-b is unchanged, so 198.51.100.21 is only added again to take its comment
+			name:  "list-a removed from config",
+			lists: []int{1},
+			wantRules: map[string]string{
+				"198.51.100.21": "List B",
+				"198.51.100.22": "Static rule",
+				"198.51.100.23": "List B",
+			},
+			wantNoRules:  []string{"198.51.100.20"},
+			wantFileList: []string{"list-b"},
 		},
 		{
-			// 198.51.100.21 still carries list-b's comment
-			name:        "list-a removed from config",
-			lists:       0,
-			wantRules:   []string{"198.51.100.22"},
-			wantNoRules: []string{"198.51.100.20", "198.51.100.21"},
+			name:        "list-b removed from config",
+			wantRules:   map[string]string{"198.51.100.22": "Static rule"},
+			wantNoRules: []string{"198.51.100.21", "198.51.100.23"},
 		},
 	}
 
@@ -244,7 +253,10 @@ func TestRemovedRulesetsAreCleanedUp(t *testing.T) {
 		ok := t.Run(step.name, func(t *testing.T) {
 			logger := testLogger(t)
 
-			lib.UfwApplyConfig.RuleSources = ruleSources[:step.lists]
+			lib.UfwApplyConfig.RuleSources = nil
+			for _, i := range step.lists {
+				lib.UfwApplyConfig.RuleSources = append(lib.UfwApplyConfig.RuleSources, ruleSources[i])
+			}
 
 			tmpDir := t.TempDir()
 
@@ -262,8 +274,8 @@ func TestRemovedRulesetsAreCleanedUp(t *testing.T) {
 			}
 
 			var wantRules, wantNoRules []string
-			for _, ip := range step.wantRules {
-				wantRules = append(wantRules, "ufw allow from "+ip+" to any port 2222 proto tcp")
+			for ip, comment := range step.wantRules {
+				wantRules = append(wantRules, "ufw allow from "+ip+" to any port 2222 proto tcp comment '"+comment+"'")
 			}
 			for _, ip := range step.wantNoRules {
 				wantNoRules = append(wantNoRules, "ufw allow from "+ip+" to any port 2222 proto tcp")
@@ -313,6 +325,7 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 		name        string
 		list        string
 		port        string
+		noComment   bool
 		wantChanged int
 		wantRules   []string
 		wantNoRules []string
@@ -375,6 +388,21 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 				"ufw allow from 203.0.113.0/24 to any port 443 proto tcp",
 			},
 		},
+		{
+			name:        "comment removed from config gives the rules the list's file name",
+			list:        "192.0.2.0/24 # TEST-NET-1\n203.0.113.0/24\n",
+			port:        "8443",
+			noComment:   true,
+			wantChanged: 1,
+			wantRules: []string{
+				"ufw allow from 192.0.2.0/24 to any port 8443 proto tcp comment 'test-list'",
+				"ufw allow from 203.0.113.0/24 to any port 8443 proto tcp comment 'test-list'",
+			},
+			wantNoRules: []string{
+				"ufw allow from 192.0.2.0/24 to any port 8443 proto tcp comment 'Test list'",
+				"ufw allow from 203.0.113.0/24 to any port 8443 proto tcp comment 'Test list'",
+			},
+		},
 	}
 
 	for _, step := range steps {
@@ -389,6 +417,11 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 			// every run gets its own tmp directory, like main does
 			tmpDir := t.TempDir()
 
+			comment := "Test list"
+			if step.noComment {
+				comment = ""
+			}
+
 			lib.UfwApplyConfig = lib.UfwApplyConfigType{RulesetDir: rulesetDir, RulesDir: rulesDir}
 			lib.UfwApplyConfig.RuleSources = []struct {
 				Url      string `yaml:"url"`
@@ -396,7 +429,7 @@ func TestFetchRulesetsSkipsUnchangedLists(t *testing.T) {
 				Port     string `yaml:"port"`
 				Comment  string `yaml:"comment"`
 			}{
-				{Url: server.URL + "/test-list", Protocol: "tcp", Port: step.port, Comment: "Test list"},
+				{Url: server.URL + "/test-list", Protocol: "tcp", Port: step.port, Comment: comment},
 			}
 
 			changedRulesets := FetchRulesets(logger, tmpDir)
@@ -487,22 +520,23 @@ func TestRemovedStaticRulesAreDeleted(t *testing.T) {
 				{IP: "198.51.100.32", Protocol: "tcp", Port: "2223", Comment: "Static C"},
 			},
 			withListC: true,
+			// list-c also has 198.51.100.32, static rules come first so it gets the static rule's comment
 			wantRules: []string{
-				"ufw allow from 198.51.100.30 to any port 2223 proto tcp",
-				"ufw allow from 198.51.100.31 to any port 2223 proto tcp",
-				"ufw allow from 198.51.100.32 to any port 2223 proto tcp",
+				"ufw allow from 198.51.100.30 to any port 2223 proto tcp comment 'Static A'",
+				"ufw allow from 198.51.100.31 to any port 2223 proto tcp comment 'Static B'",
+				"ufw allow from 198.51.100.32 to any port 2223 proto tcp comment 'Static C'",
 			},
 		},
 		{
-			// list-c still has 198.51.100.32
+			// list-c is unchanged and still has 198.51.100.32, it is only added again to take list-c's comment
 			name: "static rules dropped and changed in config",
 			staticRules: []staticRule{
-				{IP: "198.51.100.31", Protocol: "tcp", Port: "2224", Comment: "Static B"},
+				{IP: "198.51.100.31", Protocol: "tcp", Port: "2224"},
 			},
 			withListC: true,
 			wantRules: []string{
-				"ufw allow from 198.51.100.31 to any port 2224 proto tcp",
-				"ufw allow from 198.51.100.32 to any port 2223 proto tcp",
+				"ufw allow from 198.51.100.31 to any port 2224 proto tcp comment 'static-rules'",
+				"ufw allow from 198.51.100.32 to any port 2223 proto tcp comment 'List C'",
 			},
 			wantNoRules: []string{
 				"ufw allow from 198.51.100.30 to any port 2223 proto tcp",
@@ -583,6 +617,16 @@ func TestStaleRules(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	lib.UfwApplyConfig = lib.UfwApplyConfigType{RulesetDir: t.TempDir(), RulesDir: rulesDir}
+	lib.UfwApplyConfig.RuleSources = []struct {
+		Url      string `yaml:"url"`
+		Protocol string `yaml:"protocol"`
+		Port     string `yaml:"port"`
+		Comment  string `yaml:"comment"`
+	}{
+		{Url: "https://example.com/changed", Protocol: "tcp", Port: "443"},
+		{Url: "https://example.com/unchanged", Protocol: "tcp", Port: "443"},
+		{Url: "https://example.com/new-list", Protocol: "tcp", Port: "22"},
+	}
 
 	// nothing has been applied yet
 	staleRules, err := StaleRules(zerolog.Nop(), tmpDir, nil, nil)
@@ -611,10 +655,10 @@ func TestStaleRules(t *testing.T) {
 		// changed drops 192.0.2.2 and 192.0.2.3, unchanged still has 192.0.2.3
 		filepath.Join(rulesDir, "changed"):   "192.0.2.1 tcp 443 # Changed\n192.0.2.2 tcp 443 # Changed\n192.0.2.3 tcp 443 # Changed",
 		filepath.Join(tmpDir, "changed"):     "192.0.2.1 tcp 443 # Changed",
-		filepath.Join(rulesDir, "unchanged"): "192.0.2.3 tcp 443\n192.0.2.10 tcp 443",
+		filepath.Join(rulesDir, "unchanged"): "192.0.2.3 tcp 443 # Unchanged\n192.0.2.10 tcp 443 # Unchanged",
 		filepath.Join(tmpDir, "new-list"):    "198.51.100.42 tcp 22",
-		// 192.0.2.2 is also stale in changed, 198.51.100.41 tcp 2222 is a static rule
-		filepath.Join(rulesDir, "removed"): "192.0.2.2 tcp 443\n192.0.2.20 tcp 443\n198.51.100.41 tcp 2222\n192.0.2.21 tcp 443",
+		// 192.0.2.2 is also stale in changed, 198.51.100.41 tcp 2222 is a static rule, unchanged still has 192.0.2.10
+		filepath.Join(rulesDir, "removed"): "192.0.2.2 tcp 443\n192.0.2.20 tcp 443\n198.51.100.41 tcp 2222\n192.0.2.21 tcp 443\n192.0.2.10 tcp 443 # Removed",
 	}
 
 	for path, content := range files {
@@ -645,6 +689,100 @@ func TestStaleRules(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
+
+	// only unchanged has them now, the static rules and new-list's rule are added on this run anyway
+	reattributedRules, err := ReattributedRules(zerolog.Nop(), tmpDir, []string{"changed", "new-list"}, []string{"removed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got = nil
+	for _, rule := range reattributedRules {
+		got = append(got, rule.line())
+	}
+
+	want = []string{
+		"192.0.2.3 tcp 443 # Unchanged",
+		"192.0.2.10 tcp 443 # Unchanged",
+	}
+
+	if !slices.Equal(got, want) {
+		t.Errorf("reattributed rules: got %v, want %v", got, want)
+	}
+}
+
+func TestWantedRules(t *testing.T) {
+	savedConfig := lib.UfwApplyConfig
+	t.Cleanup(func() { lib.UfwApplyConfig = savedConfig })
+
+	rulesDir := t.TempDir()
+	tmpDir := t.TempDir()
+
+	lib.UfwApplyConfig = lib.UfwApplyConfigType{RulesetDir: t.TempDir(), RulesDir: rulesDir}
+	lib.UfwApplyConfig.StaticRules = []struct {
+		IP       string `yaml:"ip"`
+		Protocol string `yaml:"protocol"`
+		Port     string `yaml:"port"`
+		Comment  string `yaml:"comment"`
+	}{
+		{IP: "198.51.100.60", Protocol: "tcp", Port: "22", Comment: "Static"},
+		{IP: "198.51.100.61", Protocol: "tcp", Port: "22"},
+		{IP: "198.51.100.60/32", Protocol: "tcp", Port: "22", Comment: "Same static rule"},
+	}
+	// list-b comes before list-a, removed is no longer in config and never-fetched has no applied copy
+	lib.UfwApplyConfig.RuleSources = []struct {
+		Url      string `yaml:"url"`
+		Protocol string `yaml:"protocol"`
+		Port     string `yaml:"port"`
+		Comment  string `yaml:"comment"`
+	}{
+		{Url: "https://example.com/list-b/", Protocol: "tcp", Port: "443"},
+		{Url: "https://example.com/list-a", Protocol: "tcp", Port: "443"},
+		{Url: "https://example.com/never-fetched", Protocol: "tcp", Port: "443"},
+	}
+
+	files := map[string]string{
+		filepath.Join(rulesDir, "list-a"): "192.0.2.1 tcp 443 # List A\n192.0.2.2 tcp 443 # List A\n198.51.100.61 tcp 22 # List A",
+		// list-b changed, its old copy doesn't count
+		filepath.Join(rulesDir, "list-b"):  "192.0.2.9 tcp 443 # Old List B",
+		filepath.Join(tmpDir, "list-b"):    "192.0.2.2/32 tcp 443 # List B\n198.51.100.60 tcp 22 # List B",
+		filepath.Join(rulesDir, "removed"): "192.0.2.1 tcp 443 # Removed",
+	}
+
+	for path, content := range files {
+		err := os.WriteFile(path, []byte(content), 0644)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	wanted, err := wantedRules(zerolog.Nop(), tmpDir, []string{"list-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]string{
+		"198.51.100.60 tcp 22": "Static",
+		"198.51.100.61 tcp 22": "static-rules",
+		"192.0.2.2 tcp 443":    "List B",
+		"192.0.2.1 tcp 443":    "List A",
+	}
+
+	if len(wanted) != len(want) {
+		t.Errorf("got %d wanted rules %v, want %d", len(wanted), wanted, len(want))
+	}
+
+	for key, comment := range want {
+		rule, ok := wanted[key]
+		if !ok {
+			t.Errorf("%s is not wanted", key)
+			continue
+		}
+
+		if rule.Comment != comment {
+			t.Errorf("%s has comment %q, want %q", key, rule.Comment, comment)
+		}
+	}
 }
 
 func TestSaveStaticRules(t *testing.T) {
@@ -660,6 +798,7 @@ func TestSaveStaticRules(t *testing.T) {
 	}{
 		{IP: "100.110.70.80", Protocol: "tcp", Port: "22", Comment: "SSH Access"},
 		{IP: "100.110.70.0/24", Protocol: "all", Port: "80"},
+		{IP: "100.110.70.81", Protocol: "udp", Port: "53", Comment: "DNS #2"},
 	}
 
 	err := saveStaticRules()
@@ -672,7 +811,7 @@ func TestSaveStaticRules(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := "100.110.70.80 tcp 22 # SSH Access\n100.110.70.0/24 all 80"
+	want := "100.110.70.80 tcp 22 # SSH Access\n100.110.70.0/24 all 80 # static-rules\n100.110.70.81 udp 53 # DNS #2"
 	if string(saved) != want {
 		t.Errorf("saved %q, want %q", saved, want)
 	}

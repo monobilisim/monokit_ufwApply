@@ -68,6 +68,12 @@ func FetchRulesets(logger zerolog.Logger, tmpDir string) []string {
 			continue
 		}
 
+		// rules from a source without a comment get the list's file name, so every rule in ufw shows where it comes from
+		comment := ruleset.Comment
+		if comment == "" {
+			comment = fileName
+		}
+
 		lines := strings.Split(string(responseText), "\n")
 		var newLines []string
 
@@ -87,7 +93,7 @@ func FetchRulesets(logger zerolog.Logger, tmpDir string) []string {
 				IP:       line,
 				Protocol: ruleset.Protocol,
 				Port:     ruleset.Port,
-				Comment:  ruleset.Comment,
+				Comment:  comment,
 			}
 
 			newLines = append(newLines, rule.line())
@@ -126,14 +132,26 @@ func rulesetFileName(url string) string {
 	return splitUrl[len(splitUrl)-1]
 }
 
-func RemovedRulesets(logger zerolog.Logger) []string {
-	configuredFileNames := make(map[string]bool)
+// configuredRulesets returns the file names of the rule sources in config order
+func configuredRulesets() []string {
+	var fileNames []string
 
 	for _, ruleset := range lib.UfwApplyConfig.RuleSources {
-		if ruleset.Url != "" {
-			configuredFileNames[rulesetFileName(ruleset.Url)] = true
+		if ruleset.Url == "" {
+			continue
+		}
+
+		fileName := rulesetFileName(ruleset.Url)
+		if !slices.Contains(fileNames, fileName) {
+			fileNames = append(fileNames, fileName)
 		}
 	}
+
+	return fileNames
+}
+
+func RemovedRulesets(logger zerolog.Logger) []string {
+	configuredFileNames := configuredRulesets()
 
 	entries, err := os.ReadDir(lib.UfwApplyConfig.RulesDir)
 	if err != nil {
@@ -144,7 +162,7 @@ func RemovedRulesets(logger zerolog.Logger) []string {
 	var removedRulesets []string
 
 	for _, entry := range entries {
-		if entry.IsDir() || configuredFileNames[entry.Name()] {
+		if entry.IsDir() || slices.Contains(configuredFileNames, entry.Name()) {
 			continue
 		}
 
@@ -164,6 +182,134 @@ func staticRulesPath() string {
 // rulesets that no static rule or ruleset needs after this run. It has to run before the applied copies are
 // saved, so the dry run and the apply see the same rules.
 func StaleRules(logger zerolog.Logger, tmpDir string, changedRulesets []string, removedRulesets []string) ([]Rule, error) {
+	appliedRules, err := readAppliedRules(logger, changedRulesets, removedRulesets)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(appliedRules) == 0 {
+		return nil, nil
+	}
+
+	wanted, err := wantedRules(logger, tmpDir, changedRulesets)
+	if err != nil {
+		return nil, err
+	}
+
+	var staleRules []Rule
+	staleKeys := make(map[string]bool)
+
+	for _, rule := range appliedRules {
+		_, isWanted := wanted[rule.key()]
+		if isWanted || staleKeys[rule.key()] {
+			continue
+		}
+
+		staleKeys[rule.key()] = true
+		staleRules = append(staleRules, rule)
+	}
+
+	logger.Info().Msgf("%d rule(s) are no longer in any ruleset or static rule", len(staleRules))
+
+	return staleRules, nil
+}
+
+// ReattributedRules returns the rules that were in the last applied copy of the static rules or of a changed
+// or removed ruleset and that only rulesets this run doesn't add still have. ufw keeps the comment of the last
+// command that added a rule, so these may still carry the comment of the static rule or ruleset that dropped
+// them and are added again with the comment wantedRules gives them. Like StaleRules, it has to run before the
+// applied copies are saved.
+func ReattributedRules(logger zerolog.Logger, tmpDir string, changedRulesets []string, removedRulesets []string) ([]Rule, error) {
+	appliedRules, err := readAppliedRules(logger, changedRulesets, removedRulesets)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(appliedRules) == 0 {
+		return nil, nil
+	}
+
+	wanted, err := wantedRules(logger, tmpDir, changedRulesets)
+	if err != nil {
+		return nil, err
+	}
+
+	// static rules and the rules of changed rulesets are added on this run with the right comment anyway
+	added := make(map[string]bool)
+
+	for _, rule := range staticRules() {
+		added[rule.key()] = true
+	}
+
+	for _, fileName := range changedRulesets {
+		rules, err := readRuleset(logger, filepath.Join(tmpDir, fileName))
+		if err != nil {
+			return nil, err
+		}
+
+		for _, rule := range rules {
+			added[rule.key()] = true
+		}
+	}
+
+	var reattributedRules []Rule
+
+	for _, rule := range appliedRules {
+		wantedRule, isWanted := wanted[rule.key()]
+		if !isWanted || added[rule.key()] {
+			continue
+		}
+
+		added[rule.key()] = true
+		reattributedRules = append(reattributedRules, wantedRule)
+	}
+
+	logger.Info().Msgf("%d rule(s) lost a static rule or ruleset whose comment they may carry", len(reattributedRules))
+
+	return reattributedRules, nil
+}
+
+// wantedRules returns every rule a static rule or ruleset has after this run, keyed by rule.key(). A rule more
+// than one of them has gets the comment of the first: static rules come first, then rulesets in rule-sources
+// order. Changed rulesets are read from their new content, the others from their last applied copy.
+func wantedRules(logger zerolog.Logger, tmpDir string, changedRulesets []string) (map[string]Rule, error) {
+	wanted := make(map[string]Rule)
+
+	addWanted := func(rules []Rule) {
+		for _, rule := range rules {
+			if _, ok := wanted[rule.key()]; !ok {
+				wanted[rule.key()] = rule
+			}
+		}
+	}
+
+	addWanted(staticRules())
+
+	for _, fileName := range configuredRulesets() {
+		path := filepath.Join(lib.UfwApplyConfig.RulesDir, fileName)
+		if slices.Contains(changedRulesets, fileName) {
+			path = filepath.Join(tmpDir, fileName)
+		}
+
+		rules, err := readRuleset(logger, path)
+		// a ruleset that has never been fetched has no applied copy yet
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		addWanted(rules)
+	}
+
+	return wanted, nil
+}
+
+// readAppliedRules returns the rules in the last applied copies of the static rules and of the changed and
+// removed rulesets, the only rules a run can drop
+func readAppliedRules(logger zerolog.Logger, changedRulesets []string, removedRulesets []string) ([]Rule, error) {
 	appliedPaths := []string{staticRulesPath()}
 	for _, fileName := range slices.Concat(changedRulesets, removedRulesets) {
 		appliedPaths = append(appliedPaths, filepath.Join(lib.UfwApplyConfig.RulesDir, fileName))
@@ -185,61 +331,7 @@ func StaleRules(logger zerolog.Logger, tmpDir string, changedRulesets []string, 
 		appliedRules = append(appliedRules, rules...)
 	}
 
-	if len(appliedRules) == 0 {
-		return nil, nil
-	}
-
-	wanted := make(map[string]bool)
-
-	for _, rule := range staticRules() {
-		wanted[rule.key()] = true
-	}
-
-	// changed rulesets are wanted with their new content, the others with their applied copy
-	var wantedPaths []string
-	for _, fileName := range changedRulesets {
-		wantedPaths = append(wantedPaths, filepath.Join(tmpDir, fileName))
-	}
-
-	entries, err := os.ReadDir(lib.UfwApplyConfig.RulesDir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() || slices.Contains(changedRulesets, entry.Name()) || slices.Contains(removedRulesets, entry.Name()) {
-			continue
-		}
-
-		wantedPaths = append(wantedPaths, filepath.Join(lib.UfwApplyConfig.RulesDir, entry.Name()))
-	}
-
-	for _, path := range wantedPaths {
-		rules, err := readRuleset(logger, path)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, rule := range rules {
-			wanted[rule.key()] = true
-		}
-	}
-
-	var staleRules []Rule
-	staleKeys := make(map[string]bool)
-
-	for _, rule := range appliedRules {
-		if wanted[rule.key()] || staleKeys[rule.key()] {
-			continue
-		}
-
-		staleKeys[rule.key()] = true
-		staleRules = append(staleRules, rule)
-	}
-
-	logger.Info().Msgf("%d rule(s) are no longer in any ruleset or static rule", len(staleRules))
-
-	return staleRules, nil
+	return appliedRules, nil
 }
 
 func DeleteRules(logger zerolog.Logger, rules []Rule, dryRun bool) error {
@@ -319,7 +411,8 @@ func parseRuleset(logger zerolog.Logger, fileName string, content []byte) []Rule
 
 		var Comment string = ""
 		if strings.Contains(line, "#") {
-			splitLine := strings.Split(line, "#")
+			// the comment can have a # of its own
+			splitLine := strings.SplitN(line, "#", 2)
 			line = strings.TrimSpace(splitLine[0])
 			Comment = strings.TrimSpace(splitLine[1])
 		}

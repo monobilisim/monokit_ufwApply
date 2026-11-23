@@ -13,5 +13,5 @@ UFW firewall rule manager plugin. Feature parity with monokit1 `ufwApply/`.
 - [X] Deleting rules a changed list no longer has (dropped IPs, old port/protocol), except rules something else still needs
 - [X] `--no-cmdout` style output control (`command-output` in ufw.yml, ufw output always in errors and alarms)
 - [X] Configurable `ruleset_dir`, `rules_dir` and `tmp_dir_base` (timestamped temp dir per run)
-- [ ] Per-rule comments so rules stay attributable to their source list
+- [X] Per-rule comments so rules stay attributable to their source list (default comment for sources and static rules without one, a shared rule carries the comment of the first static rule or source that has it)
 

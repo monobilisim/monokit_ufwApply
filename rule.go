@@ -17,15 +17,21 @@ type Rule struct {
 	Comment  string
 }
 
+// static rules without a comment get the name of the file they are kept in, so every rule in ufw shows where it comes from
 func staticRules() []Rule {
 	var rules []Rule
 
 	for _, staticRule := range lib.UfwApplyConfig.StaticRules {
+		comment := staticRule.Comment
+		if comment == "" {
+			comment = staticRulesFileName
+		}
+
 		rules = append(rules, Rule{
 			IP:       staticRule.IP,
 			Protocol: staticRule.Protocol,
 			Port:     staticRule.Port,
-			Comment:  staticRule.Comment,
+			Comment:  comment,
 		})
 	}
 

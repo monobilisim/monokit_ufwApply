@@ -160,8 +160,23 @@ func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string, removedRu
 		return err
 	}
 
+	reattributedRules, err := ReattributedRules(logger, tmpDir, rulesets, removedRulesets)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to find the rules that need another comment")
+		return err
+	}
+
+	// a rule more than one static rule or ruleset has is always added with the same comment
+	wanted, err := wantedRules(logger, tmpDir, rulesets)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to find which comment every rule gets")
+		return err
+	}
+
 	for _, rule := range staticRules() {
 		logger.Info().Msgf("Running static rule %s", rule.IP)
+
+		rule.Comment = wanted[rule.key()].Comment
 
 		err := runCommand(logger, rule.AllowCommand(false))
 		if err != nil {
@@ -179,10 +194,21 @@ func UfwApply(logger zerolog.Logger, tmpDir string, rulesets []string, removedRu
 		}
 
 		for _, rule := range parseRuleset(logger, fileName, fileContent) {
+			rule.Comment = wanted[rule.key()].Comment
+
 			err := runCommand(logger, rule.AllowCommand(false))
 			if err != nil {
 				return err
 			}
+		}
+	}
+
+	for _, rule := range reattributedRules {
+		logger.Info().Msgf("Running rule %s again with comment %q", rule.key(), rule.Comment)
+
+		err := runCommand(logger, rule.AllowCommand(false))
+		if err != nil {
+			return err
 		}
 	}
 

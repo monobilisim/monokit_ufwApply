@@ -12,6 +12,10 @@
 # 100.110.70.0 # Comment -> 100.110.70.0/32
 # Removing a source deletes the rules it added, except rules a static rule or another source also has.
 # The same goes for rules a source no longer has, like an IP dropped from the list or the old port after a port change.
+# Comments are optional, rules from a source without one get the list's file name as comment, like ips-v4.
+# A rule that a static rule or more than one source has gets the comment of the first one: static rules come first,
+# then rule sources in this order. When the first one drops the rule, the rule takes the comment of the next one.
+# Reordering rule sources moves these comments only once one of the lists changes.
 rule-sources:
   - url: "https://www.cloudflare.com/ips-v4"
     protocol: "all"
@@ -29,7 +33,7 @@ rule-sources:
 # Static rules that will always be applied
 # Removing a static rule, or changing its ip, protocol or port, deletes the old rule unless a rule source also has it.
 # You can use both single IPs and IP blocks here.
-# Comments are optional.
+# Comments are optional, static rules without one get static-rules as comment.
 static-rules:
   - ip: 100.110.70.80
     protocol: "tcp"
